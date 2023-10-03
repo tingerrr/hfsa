@@ -48,7 +48,7 @@ use std::iter::FusedIterator;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
-/// A token representing part of the input and its kind.
+/// A token representing non-empty part of the input and its kind.
 #[derive(Debug, Clone, Copy)]
 pub struct Token<'s> {
     lexeme: &'s str,
@@ -76,7 +76,48 @@ pub enum TokenKind {
 }
 
 impl<'s> Token<'s> {
-    /// The lexeme of this token, i.e. the textual representation.
+    /// Create a new token from the given lexeme, start index and token kind, returns [`None`] if
+    /// the lexeme is not a single kind.
+    ///
+    /// # Examples
+    /// ```
+    /// # fn _test() -> Option<()> {
+    /// use hfsa::{Token, TokenKind};
+    /// let token = Token::new("token", 0)?;
+    /// assert_eq!(token.kind(), TokenKind::Text);
+    /// # Some(()) } _test().unwrap();
+    /// ```
+    pub fn new(lexeme: &'s str, start: usize) -> Option<Self> {
+        let (mut token, rest) = Self::lex(lexeme)?;
+        token.start = start;
+        if !rest.is_empty() {
+            None
+        } else {
+            Some(token)
+        }
+    }
+
+    /// Creates a new token wihtout validating it's invariants.
+    ///
+    /// # Safety
+    /// The user must ensure that the lexeme is not empty and matches the kind. Constructing an
+    /// invalid token causes no undefined behavior, but may result in panics when using it.
+    ///
+    /// # Examples
+    /// ```
+    /// use hfsa::{Token, TokenKind};
+    /// let _ = unsafe { Token::new_unchecked("token", 0, TokenKind::Text) };
+    /// ```
+    #[inline]
+    pub unsafe fn new_unchecked(lexeme: &'s str, start: usize, kind: TokenKind) -> Self {
+        Self {
+            lexeme,
+            start,
+            kind,
+        }
+    }
+
+    /// The lexeme of this token, i.e. the textual representation. A lexeme is never empty.
     #[inline]
     pub fn lexeme(&self) -> &'s str {
         self.lexeme
@@ -104,28 +145,72 @@ impl<'s> Token<'s> {
     ///
     /// # Examples
     /// ```
+    /// # fn _test() -> Option<()> {
     /// use hfsa::Token;
     /// let input = "token";
-    /// let (token, rest) = Token::lex(input).ok_or("token")?;
+    /// let (token, rest) = Token::lex(input)?;
     /// assert_eq!(&input[token.span()], token.lexeme());
-    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// # Some(()) } _test().unwrap();
     /// ```
     #[inline]
     pub fn span(&self) -> Range<usize> {
         self.start..self.start + self.lexeme.len()
     }
+
+    /// Split this token into two, with the second starting at the given index, returns [`None`] if
+    /// one of the resulting tokens would be empty.
+    ///
+    /// # Examples
+    /// ```
+    /// # fn _test() -> Option<()> {
+    /// use hfsa::Token;
+    /// let input = "token";
+    /// let (token, _) = Token::lex(input)?;
+    /// let (first, second) = token.split(1)?;
+    /// assert_eq!(first.lexeme(), "t");
+    /// assert_eq!(second.lexeme(), "oken");
+    /// # Some(()) } _test().unwrap();
+    /// ```
+    pub fn split(self, index: usize) -> Option<(Self, Self)> {
+        if index == 0 || index >= self.lexeme.len() {
+            return None;
+        }
+
+        let (first, second) = self.lexeme.split_at(index);
+        Some((
+            Self {
+                lexeme: first,
+                start: self.start,
+                kind: self.kind,
+            },
+            Self {
+                lexeme: second,
+                start: self.start + index,
+                kind: self.kind,
+            },
+        ))
+    }
 }
 
 impl TokenKind {
+    /// The single quote token literal.
+    pub const SINGLE: &str = "'";
+
+    /// The double quote token literal.
+    pub const DOUBLE: &str = "\"";
+
+    /// The escape token literal.
+    pub const ESCAPE: &str = "\\";
+
     /// Whether this is [`TokenKind::Single`].
     #[inline]
-    pub fn is_single_quote(self) -> bool {
+    pub fn is_singe(self) -> bool {
         matches!(self, TokenKind::Single)
     }
 
     /// Whether this is [`TokenKind::Double`].
     #[inline]
-    pub fn is_double_quote(self) -> bool {
+    pub fn is_double(self) -> bool {
         matches!(self, TokenKind::Double)
     }
 
@@ -143,7 +228,7 @@ impl TokenKind {
 
     /// Whether this is [`TokenKind::Space`].
     #[inline]
-    pub fn is_whitespace(self) -> bool {
+    pub fn is_space(self) -> bool {
         matches!(self, TokenKind::Space)
     }
 }
@@ -154,15 +239,16 @@ impl<'s> Token<'s> {
     ///
     /// # Examples
     /// ```
+    /// # fn _test() -> Option<()> {
     /// use hfsa::Token;
     /// let input = "git commit -m 'my commit message'";
-    /// let (first, rest) = Token::lex(input).ok_or("expected first token")?;
-    /// let (second, rest) = Token::lex(rest).ok_or("expected second token")?;
-    /// let (third, rest) = Token::lex(rest).ok_or("expected third token")?;
+    /// let (first, rest) = Token::lex(input)?;
+    /// let (second, rest) = Token::lex(rest)?;
+    /// let (third, rest) = Token::lex(rest)?;
     /// assert_eq!(first.lexeme(), "git");
     /// assert_eq!(second.lexeme(), " ");
     /// assert_eq!(third.lexeme(), "commit");
-    /// # Ok::<_, Box<dyn std::error::Error>>(())
+    /// # Some(()) } _test().unwrap();
     /// ```
     pub fn lex(input: &'s str) -> Option<(Token<'s>, &'s str)> {
         let ctor = |input: &'s str, len, kind| {
@@ -183,34 +269,24 @@ impl<'s> Token<'s> {
             b'"' => ctor(input, 1, TokenKind::Double),
             b'\\' => ctor(input, 1, TokenKind::Escape),
             x => {
-                type Ctor<'s> = fn(&'s str, &'s str) -> (Token<'s>, &'s str);
+                type Ctor<'s> = fn(&'s str) -> Token<'s>;
                 type Check = fn(u8) -> bool;
 
                 let (ctor, check): (Ctor, Check) = if x == b' ' {
                     (
-                        |token, rest| {
-                            (
-                                Token {
-                                    lexeme: token,
-                                    kind: TokenKind::Space,
-                                    start: 0,
-                                },
-                                rest,
-                            )
+                        |token| Token {
+                            lexeme: token,
+                            kind: TokenKind::Space,
+                            start: 0,
                         },
                         |b| b != b' ',
                     )
                 } else {
                     (
-                        |token, rest| {
-                            (
-                                Token {
-                                    lexeme: token,
-                                    kind: TokenKind::Text,
-                                    start: 0,
-                                },
-                                rest,
-                            )
+                        |token| Token {
+                            lexeme: token,
+                            kind: TokenKind::Text,
+                            start: 0,
                         },
                         |b| matches!(b, b'\'' | b'"' | b'\\' | b' '),
                     )
@@ -218,9 +294,9 @@ impl<'s> Token<'s> {
 
                 if let Some(next) = bytes[1..].iter().position(|&b| check(b)) {
                     let (token, rest) = input.split_at(next + 1);
-                    ctor(token, rest)
+                    (ctor(token), rest)
                 } else {
-                    ctor(input, "")
+                    (ctor(input), "")
                 }
             }
         })
@@ -230,10 +306,23 @@ impl<'s> Token<'s> {
 /// An [`Iterator`] over the [`Token`]s of a given input.
 ///
 /// This struct is returned by the [`lex`] function, see its documentaion for more info.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TokenIter<'s> {
     rest: &'s str,
-    idx: usize,
+    index: usize,
+}
+
+impl<'s> TokenIter<'s> {
+    /// The rest of the input which was not yet tokenized.
+    pub fn rest(&self) -> &'s str {
+        self.rest
+    }
+
+    /// Returns the current index, that is the starting index of [`TokenIter::rest`] in the original
+    /// input.
+    pub fn index(&self) -> usize {
+        self.index
+    }
 }
 
 impl<'s> Iterator for TokenIter<'s> {
@@ -241,9 +330,9 @@ impl<'s> Iterator for TokenIter<'s> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let (mut token, rest) = Token::lex(self.rest)?;
-        token.start += self.idx;
+        token.start += self.index;
         self.rest = rest;
-        self.idx += token.len().get();
+        self.index += token.len().get();
 
         Some(token)
     }
@@ -284,7 +373,7 @@ impl FusedIterator for TokenIter<'_> {}
 pub fn lex(input: &str) -> TokenIter<'_> {
     TokenIter {
         rest: input,
-        idx: 0,
+        index: 0,
     }
 }
 
@@ -490,6 +579,22 @@ mod tests {
         ($input:literal => err $variant:ident($($fields:expr),+)) => {
             assert_eq!(parse(lex($input)), Err(ParseArgsError::$variant($($fields),+)))
         };
+    }
+
+    mod token {
+        use super::*;
+
+        #[test]
+        fn split_first_empty() {
+            let (token, _) = Token::lex("token").unwrap();
+            assert!(token.split(0).is_none());
+        }
+
+        #[test]
+        fn split_second_empty() {
+            let (token, _) = Token::lex("token").unwrap();
+            assert!(token.split(5).is_none());
+        }
     }
 
     mod lex {
