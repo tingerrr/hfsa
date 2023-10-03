@@ -16,13 +16,14 @@
 //!   whitespace closes it again
 //!   - opening and closing quotes are discarded
 //!   - tokens inside quotes are collected into a single arg
-//! - preceding a token with `\` escapes the whole token
-//!   - this currently has no effect, as escaping is only allowed in double quotes which keeps all
-//!     multi-byte tokens anyway
-//!   - escapes currently allowed any token to be escaped, but will be restricted to known sequences
-//!     later
-//!   - escapes are currently only allowed in double quotes
+//! - preceding a token with `\` escapes the next char
+//! - single quotes ignore escapes
 //! - outside of quotes whitespace is discarded, inside it is kept
+//!
+//! ### Escape sequences
+//! - `\n`, `\r` and `\t` for newline, carriage return and tab respectively
+//! - `\"` and `\'` for literal opening quotes
+//! - `\\` for the escape character itself
 //!
 //! ## Goals
 //! - no dependencies
@@ -38,7 +39,6 @@
 //! - variable interpolation
 //! - evaluation of code
 
-// TODO: split tokens if they have len > 2 and are preceded by an escape
 // TODO: glue contigous tokens back together in tmp to avoid clones where they could be borrowed
 
 use std::borrow::Cow;
@@ -71,7 +71,7 @@ pub enum TokenKind {
     /// Text.
     Text,
 
-    /// Whitespace.
+    /// Whitespace, one or more ASCII space characters ` `.
     Space,
 }
 
@@ -160,6 +160,9 @@ impl<'s> Token<'s> {
     /// Split this token into two, with the second starting at the given index, returns [`None`] if
     /// one of the resulting tokens would be empty.
     ///
+    /// # Panics
+    /// Panics if the index is not on a UTF-8 code point boundary.
+    ///
     /// # Examples
     /// ```
     /// # fn _test() -> Option<()> {
@@ -189,6 +192,20 @@ impl<'s> Token<'s> {
                 kind: self.kind,
             },
         ))
+    }
+
+    fn break_esc_seq(self) -> (Self, Option<Self>) {
+        let idx = self
+            .lexeme
+            .chars()
+            .next()
+            .expect("token cannot be empty")
+            .len_utf8();
+
+        match self.split(idx) {
+            Some((f, s)) => (f, Some(s)),
+            None => (self, None),
+        }
     }
 }
 
@@ -447,6 +464,30 @@ where
     let mut last = TokenKind::Space;
     let mut state = State::Normal;
 
+    fn escape_next<'s>(next: Token<'s>, tmp: &mut Vec<Cow<'s, str>>) -> Option<()> {
+        match next.kind {
+            TokenKind::Single | TokenKind::Double | TokenKind::Escape => {
+                tmp.push(next.lexeme.into());
+            }
+            TokenKind::Text => {
+                let esc = match &next.lexeme[..1] {
+                    "n" => "\n",
+                    "r" => "\r",
+                    "t" => "\t",
+                    _ => return None,
+                };
+                tmp.push(esc.into());
+
+                if let (_, Some(rest)) = next.break_esc_seq() {
+                    tmp.push(rest.lexeme.into());
+                }
+            }
+            TokenKind::Space => return None,
+        };
+
+        Some(())
+    }
+
     loop {
         let Some(token) = tokens.next() else {
             state.fail_if_open()?;
@@ -454,7 +495,7 @@ where
         };
 
         match state {
-            State::Open(is_double, idx) => {
+            State::Open(is_double, _) => {
                 let mut f = |tokens: &mut std::iter::Peekable<I>| match tokens.next() {
                     Some(Token {
                         kind: TokenKind::Space,
@@ -473,10 +514,10 @@ where
                 match token.kind() {
                     TokenKind::Single if !is_double => f(&mut tokens),
                     TokenKind::Double if is_double => f(&mut tokens),
-                    TokenKind::Escape if is_double => match tokens.next() {
-                        Some(next) => tmp.push(next.lexeme.into()),
-                        None => return Err(ParseArgsError::UnclosedDouble(idx)),
-                    },
+                    TokenKind::Escape if is_double => tokens
+                        .next()
+                        .and_then(|next| escape_next(next, &mut tmp))
+                        .ok_or(ParseArgsError::InvalidEscape(token.start))?,
                     _ => {
                         tmp.push(token.lexeme.into());
                     }
@@ -504,7 +545,12 @@ where
                         tmp.push(token.lexeme.into());
                     }
                 }
-                TokenKind::Escape => return Err(ParseArgsError::InvalidEscape(token.start)),
+                TokenKind::Escape => {
+                    tokens
+                        .next()
+                        .and_then(|next| escape_next(next, &mut tmp))
+                        .ok_or(ParseArgsError::InvalidEscape(token.start))?;
+                }
                 TokenKind::Text => tmp.push(token.lexeme.into()),
                 TokenKind::Space if last == TokenKind::Space => {
                     // NOTE: this happens only if there is leading space, so we don't push it
@@ -705,9 +751,9 @@ mod tests {
         fn double_escape() {
             test_parse!(r#""a \"\" b""# => ["a \"\" b"]);
             test_parse!(r#""a \\ b""# => ["a \\ b"]);
-            test_parse!(r#""a \ b""# => ["a  b"]);
+            test_parse!(r#""a \ b""# => err InvalidEscape(3));
             test_parse!(r#"a "\""# => err UnclosedDouble(2));
-            test_parse!(r#""a \"# => err UnclosedDouble(0));
+            test_parse!(r#""a \"# => err InvalidEscape(3));
         }
 
         #[test]
@@ -715,6 +761,16 @@ mod tests {
             test_parse!(r#"don't do this"# => ["don't", "do", "this"]);
             test_parse!(r#"a b'"# => ["a", "b'"]);
             test_parse!(r#"a b""# => ["a", "b\""]);
+        }
+
+        #[test]
+        fn escape() {
+            test_parse!(r#"\\"# => ["\\"]);
+            test_parse!(r#"\n"# => ["\n"]);
+            test_parse!(r#"\na"# => ["\na"]);
+            test_parse!(r#"\n a"# => ["\n", "a"]);
+            test_parse!(r#"\'\n"# => ["'\n"]);
+            test_parse!(r#"\"\n"# => ["\"\n"]);
         }
     }
 }
