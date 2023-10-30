@@ -12,14 +12,14 @@
 //! ```
 //!
 //! ## Semantics
-//! - whitespace followed by a quote will open the quote, the same unescaped quote followed
+//! - whitespace followed by a quote will open the quote, the same unescaped quote followed by
 //!   whitespace closes it again
 //!   - opening and closing quotes are discarded
 //!   - tokens inside quotes are collected into a single arg
 //! - preceding a token with `\` intorduces an escape sequence
-//! - regular args fail on escapes
-//! - single quotes ignore escapes
-//! - double quotes interpret escapes
+//!   - regular args fail on escapes
+//!   - single quotes ignore escapes
+//!   - double quotes interpret escapes
 //! - outside of quotes whitespace is discarded, inside it is kept
 //!
 //! ### Escape sequences
