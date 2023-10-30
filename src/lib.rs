@@ -16,13 +16,15 @@
 //!   whitespace closes it again
 //!   - opening and closing quotes are discarded
 //!   - tokens inside quotes are collected into a single arg
-//! - preceding a token with `\` escapes the next char
+//! - preceding a token with `\` intorduces an escape sequence
+//! - regular args fail on escapes
 //! - single quotes ignore escapes
+//! - double quotes interpret escapes
 //! - outside of quotes whitespace is discarded, inside it is kept
 //!
 //! ### Escape sequences
 //! - `\n`, `\r` and `\t` for newline, carriage return and tab respectively
-//! - `\"` and `\'` for literal opening quotes
+//! - `\"` for literal opening quotes
 //! - `\\` for the escape character itself
 //!
 //! ## Goals
@@ -466,7 +468,7 @@ where
 
     fn escape_next<'s>(next: Token<'s>, tmp: &mut Vec<Cow<'s, str>>) -> Option<()> {
         match next.kind {
-            TokenKind::Single | TokenKind::Double | TokenKind::Escape => {
+            TokenKind::Double | TokenKind::Escape => {
                 tmp.push(next.lexeme.into());
             }
             TokenKind::Text => {
@@ -482,7 +484,7 @@ where
                     tmp.push(rest.lexeme.into());
                 }
             }
-            TokenKind::Space => return None,
+            TokenKind::Single | TokenKind::Space => return None,
         };
 
         Some(())
@@ -545,12 +547,7 @@ where
                         tmp.push(token.lexeme.into());
                     }
                 }
-                TokenKind::Escape => {
-                    tokens
-                        .next()
-                        .and_then(|next| escape_next(next, &mut tmp))
-                        .ok_or(ParseArgsError::InvalidEscape(token.start))?;
-                }
+                TokenKind::Escape => return Err(ParseArgsError::InvalidEscape(token.start)),
                 TokenKind::Text => tmp.push(token.lexeme.into()),
                 TokenKind::Space if last == TokenKind::Space => {
                     // NOTE: this happens only if there is leading space, so we don't push it
@@ -775,12 +772,13 @@ mod tests {
 
         #[test]
         fn escape() {
-            test_parse!(r#"\\"# => ["\\"]);
-            test_parse!(r#"\n"# => ["\n"]);
-            test_parse!(r#"\na"# => ["\na"]);
-            test_parse!(r#"\n a"# => ["\n", "a"]);
-            test_parse!(r#"\'\n"# => ["'\n"]);
-            test_parse!(r#"\"\n"# => ["\"\n"]);
+            test_parse!(r#""\n""# => ["\n"]);
+            test_parse!(r#""\na""# => ["\na"]);
+            test_parse!(r#""\n a""# => ["\n a"]);
+            test_parse!(r#""\"\n""# => ["\"\n"]);
+            test_parse!(r#""\'\n""# => err InvalidEscape(1));
+            test_parse!(r#"\\"# => err InvalidEscape(0));
+            test_parse!(r#"a\\b"# => err InvalidEscape(1));
         }
     }
 }
