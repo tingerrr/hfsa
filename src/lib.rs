@@ -70,7 +70,7 @@ pub enum TokenKind {
     /// A backslash for escaping `\`.
     Escape,
 
-    /// Text.
+    /// Text, one or more characters not matched by the other token kinds.
     Text,
 
     /// Whitespace, one or more ASCII whitespace characters (` `, `\r`, `\n`, `\t`).
@@ -503,7 +503,7 @@ where
 
         match state {
             State::Open(is_double, _) => {
-                let mut f = |tokens: &mut std::iter::Peekable<I>| match tokens.next() {
+                let mut close_quote = |tokens: &mut std::iter::Peekable<I>| match tokens.next() {
                     Some(Token {
                         kind: TokenKind::Space,
                         ..
@@ -519,8 +519,8 @@ where
                 };
 
                 match token.kind() {
-                    TokenKind::Single if !is_double => f(&mut tokens),
-                    TokenKind::Double if is_double => f(&mut tokens),
+                    TokenKind::Single if !is_double => close_quote(&mut tokens),
+                    TokenKind::Double if is_double => close_quote(&mut tokens),
                     TokenKind::Escape if is_double => tokens
                         .next()
                         .and_then(|next| escape_next(next, &mut tmp))
