@@ -472,12 +472,17 @@ where
                 tmp.push(next.lexeme.into());
             }
             TokenKind::Text => {
+                if !next.lexeme.starts_with(['n', 'r', 't']) {
+                    return None;
+                }
+
                 let esc = match &next.lexeme[..1] {
                     "n" => "\n",
                     "r" => "\r",
                     "t" => "\t",
-                    _ => return None,
+                    _ => unreachable!(),
                 };
+
                 tmp.push(esc.into());
 
                 if let (_, Some(rest)) = next.break_esc_seq() {
