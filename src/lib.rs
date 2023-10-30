@@ -71,7 +71,7 @@ pub enum TokenKind {
     /// Text.
     Text,
 
-    /// Whitespace, one or more ASCII space characters ` `.
+    /// Whitespace, one or more ASCII whitespace characters (` `, `\r`, `\n`, `\t`).
     Space,
 }
 
@@ -289,14 +289,14 @@ impl<'s> Token<'s> {
                 type Ctor<'s> = fn(&'s str) -> Token<'s>;
                 type Check = fn(u8) -> bool;
 
-                let (ctor, check): (Ctor, Check) = if x == b' ' {
+                let (ctor, check): (Ctor, Check) = if matches!(x, b' ' | b'\r' | b'\n' | b'\t') {
                     (
                         |token| Token {
                             lexeme: token,
                             kind: TokenKind::Space,
                             start: 0,
                         },
-                        |b| b != b' ',
+                        |b| !matches!(b, b' ' | b'\r' | b'\n' | b'\t'),
                     )
                 } else {
                     (
@@ -305,7 +305,7 @@ impl<'s> Token<'s> {
                             kind: TokenKind::Text,
                             start: 0,
                         },
-                        |b| matches!(b, b'\'' | b'"' | b'\\' | b' '),
+                        |b| matches!(b, b'\'' | b'"' | b'\\' | b' ' | b'\r' | b'\n' | b'\t'),
                     )
                 };
 
@@ -705,6 +705,16 @@ mod tests {
                 Text  = "Wor",
                 Escape,
                 Text  = "d"
+            ]);
+        }
+
+        #[test]
+        fn other_whitespace() {
+            test_lex!("a\nb \t " => [
+                Text  = "a",
+                Space = "\n",
+                Text  = "b",
+                Space = " \t "
             ]);
         }
     }
