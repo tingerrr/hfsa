@@ -41,8 +41,6 @@
 //! - variable interpolation
 //! - evaluation of code
 
-// TODO: glue contigous tokens back together in tmp to avoid clones where they could be borrowed
-
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt::Display;
@@ -495,6 +493,11 @@ where
         Some(())
     }
 
+    // TODO: glue contigous tokens back together in tmp to avoid clones where they could be borrowed
+    fn glue_tokens<'s>(tokens: Vec<Cow<'s, str>>) -> Cow<'s, str> {
+        String::from_iter(tokens).into()
+    }
+
     loop {
         let Some(token) = tokens.next() else {
             state.fail_if_open()?;
@@ -509,7 +512,7 @@ where
                         ..
                     })
                     | None => {
-                        args.push(String::from_iter(std::mem::take(&mut tmp)).into());
+                        args.push(glue_tokens(std::mem::take(&mut tmp)));
                         state = State::Normal;
                     }
                     Some(next) => {
@@ -559,7 +562,7 @@ where
                     continue;
                 }
                 TokenKind::Space => {
-                    args.push(String::from_iter(std::mem::take(&mut tmp)).into());
+                    args.push(glue_tokens(std::mem::take(&mut tmp)));
                 }
             },
         }
@@ -568,7 +571,7 @@ where
     }
 
     if !tmp.is_empty() {
-        args.push(String::from_iter(tmp).into());
+        args.push(glue_tokens(tmp));
     }
 
     Ok(args)
