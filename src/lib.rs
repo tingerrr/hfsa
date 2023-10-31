@@ -457,6 +457,19 @@ pub fn parse<'s, I>(tokens: I) -> Result<Vec<Cow<'s, str>>, ParseArgsError>
 where
     I: Iterator<Item = Token<'s>>,
 {
+    // SAFETY: we don't declare the optimization opportunity
+    unsafe { parse_impl::<_, false>(tokens) }
+}
+
+/// # Safety
+/// The caller must ensure that the lexemes yielded by the token iterator all
+/// belong to one allocation if OPTIMIZE_INTERNAL is true
+unsafe fn parse_impl<'s, I, const OPTIMIZE_INTERNAL: bool>(
+    tokens: I,
+) -> Result<Vec<Cow<'s, str>>, ParseArgsError>
+where
+    I: Iterator<Item = Token<'s>>,
+{
     let mut tokens = tokens.peekable();
     let mut args: Vec<Cow<str>> = vec![];
 
@@ -470,15 +483,11 @@ where
                 args.push(next.lexeme.into());
             }
             TokenKind::Text => {
-                if !next.lexeme.starts_with(['n', 'r', 't']) {
-                    return None;
-                }
-
-                let esc = match &next.lexeme[..1] {
-                    "n" => "\n",
-                    "r" => "\r",
-                    "t" => "\t",
-                    _ => unreachable!(),
+                let esc = match next.lexeme.as_bytes().first() {
+                    Some(b'n') => "\n",
+                    Some(b'r') => "\r",
+                    Some(b't') => "\t",
+                    _ => return None,
                 };
 
                 args.push(esc.into());
@@ -494,9 +503,39 @@ where
     }
 
     // TODO: glue contigous tokens back together in tmp to avoid clones where they could be borrowed
-    fn glue_tokens<'s>(tokens: &mut Vec<Cow<'s, str>>, start: usize) {
-        let res = String::from_iter(tokens.drain(start..)).into();
-        tokens.push(res);
+    fn glue_tokens<'s, const OPTIMIZE_INTERNAL: bool>(
+        tokens: &mut Vec<Cow<'s, str>>,
+        start: usize,
+    ) {
+        if OPTIMIZE_INTERNAL {
+            let tmp = tokens
+                .drain(start..)
+                .reduce(|acc, item| {
+                    if matches!((&acc, &item), (Cow::Borrowed(_), Cow::Borrowed(_))) {
+                        let (a, b) = (acc.as_ref(), item.as_ref());
+                        if a.as_ptr().wrapping_add(a.len()) == b.as_ptr() {
+                            // SAFETY:
+                            // - we only allow this for trusted iterators which yield from a single
+                            //   allocation
+                            // - we ensure that both are borrowed such that the references are not
+                            //   local
+                            let glued = unsafe {
+                                let slice =
+                                    std::slice::from_raw_parts(a.as_ptr(), a.len() + b.len());
+                                std::str::from_utf8_unchecked(slice)
+                            };
+                            return Cow::Borrowed(glued);
+                        }
+                    }
+
+                    acc + item
+                })
+                .unwrap();
+            tokens.push(tmp);
+        } else {
+            let res = String::from_iter(tokens.drain(start..)).into();
+            tokens.push(res);
+        }
     }
 
     loop {
@@ -513,7 +552,7 @@ where
                         ..
                     })
                     | None => {
-                        glue_tokens(&mut args, tmp_start);
+                        glue_tokens::<OPTIMIZE_INTERNAL>(&mut args, tmp_start);
                         tmp_start += 1;
                         state = State::Normal;
                     }
@@ -565,7 +604,7 @@ where
                     continue;
                 }
                 TokenKind::Space => {
-                    glue_tokens(&mut args, tmp_start);
+                    glue_tokens::<OPTIMIZE_INTERNAL>(&mut args, tmp_start);
                     tmp_start += 1;
                 }
             },
@@ -575,7 +614,7 @@ where
     }
 
     if !args[tmp_start..].is_empty() {
-        glue_tokens(&mut args, tmp_start);
+        glue_tokens::<OPTIMIZE_INTERNAL>(&mut args, tmp_start);
     }
 
     Ok(args)
@@ -590,7 +629,8 @@ where
 /// # Ok::<_, Box<dyn std::error::Error>>(())
 /// ```
 pub fn args(input: &str) -> Result<Vec<Cow<str>>, ParseArgsError> {
-    parse(lex(input))
+    // SAFETY: we know that lex only produces tokens coming from input which must be one allocation
+    unsafe { parse_impl::<_, true>(lex(input)) }
 }
 
 #[cfg(test)]
@@ -628,12 +668,20 @@ mod tests {
     }
 
     macro_rules! test_parse {
-        ($input:literal => [$($output:expr),+ $(,)?]) => {
-            assert_eq!(parse(lex($input)).unwrap(), vec![$($output),+])
-        };
-        ($input:literal => err $variant:ident($($fields:expr),+)) => {
-            assert_eq!(parse(lex($input)), Err(ParseArgsError::$variant($($fields),+)))
-        };
+        ($input:literal => [$($output:expr),+ $(,)?]) => { unsafe {
+            assert_eq!(parse_impl::<_, true>(lex($input)).unwrap(), vec![$($output),+]);
+            assert_eq!(parse_impl::<_, false>(lex($input)).unwrap(), vec![$($output),+]);
+        }};
+        ($input:literal => err $variant:ident($($fields:expr),+)) => { unsafe {
+            assert_eq!(
+                parse_impl::<_, true>(lex($input)),
+                Err(ParseArgsError::$variant($($fields),+))
+            );
+            assert_eq!(
+                parse_impl::<_, false>(lex($input)),
+                Err(ParseArgsError::$variant($($fields),+))
+            );
+        }};
     }
 
     mod token {
