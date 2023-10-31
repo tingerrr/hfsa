@@ -460,14 +460,14 @@ where
     let mut tokens = tokens.peekable();
     let mut args: Vec<Cow<str>> = vec![];
 
-    let mut tmp: Vec<Cow<str>> = vec![];
+    let mut tmp_start = 0;
     let mut last = TokenKind::Space;
     let mut state = State::Normal;
 
-    fn escape_next<'s>(next: Token<'s>, tmp: &mut Vec<Cow<'s, str>>) -> Option<()> {
+    fn escape_next<'s>(next: Token<'s>, args: &mut Vec<Cow<'s, str>>) -> Option<()> {
         match next.kind {
             TokenKind::Double | TokenKind::Escape => {
-                tmp.push(next.lexeme.into());
+                args.push(next.lexeme.into());
             }
             TokenKind::Text => {
                 if !next.lexeme.starts_with(['n', 'r', 't']) {
@@ -481,10 +481,10 @@ where
                     _ => unreachable!(),
                 };
 
-                tmp.push(esc.into());
+                args.push(esc.into());
 
                 if let (_, Some(rest)) = next.break_esc_seq() {
-                    tmp.push(rest.lexeme.into());
+                    args.push(rest.lexeme.into());
                 }
             }
             TokenKind::Single | TokenKind::Space => return None,
@@ -494,8 +494,9 @@ where
     }
 
     // TODO: glue contigous tokens back together in tmp to avoid clones where they could be borrowed
-    fn glue_tokens<'s>(tokens: Vec<Cow<'s, str>>) -> Cow<'s, str> {
-        String::from_iter(tokens).into()
+    fn glue_tokens<'s>(tokens: &mut Vec<Cow<'s, str>>, start: usize) {
+        let res = String::from_iter(tokens.drain(start..)).into();
+        tokens.push(res);
     }
 
     loop {
@@ -512,12 +513,13 @@ where
                         ..
                     })
                     | None => {
-                        args.push(glue_tokens(std::mem::take(&mut tmp)));
+                        glue_tokens(&mut args, tmp_start);
+                        tmp_start += 1;
                         state = State::Normal;
                     }
                     Some(next) => {
-                        tmp.push(token.lexeme.into());
-                        tmp.push(next.lexeme.into());
+                        args.push(token.lexeme.into());
+                        args.push(next.lexeme.into());
                     }
                 };
 
@@ -526,10 +528,10 @@ where
                     TokenKind::Double if is_double => close_quote(&mut tokens),
                     TokenKind::Escape if is_double => tokens
                         .next()
-                        .and_then(|next| escape_next(next, &mut tmp))
+                        .and_then(|next| escape_next(next, &mut args))
                         .ok_or(ParseArgsError::InvalidEscape(token.start))?,
                     _ => {
-                        tmp.push(token.lexeme.into());
+                        args.push(token.lexeme.into());
                     }
                 }
             }
@@ -538,6 +540,7 @@ where
                     if let Some(next) = tokens.peek().copied() {
                         if next.kind == token.kind && last == TokenKind::Space {
                             args.push(String::new().into());
+                            tmp_start += 1;
                             let _ = tokens.next();
                             continue;
                         }
@@ -552,17 +555,18 @@ where
                     if last == TokenKind::Space {
                         state = new;
                     } else {
-                        tmp.push(token.lexeme.into());
+                        args.push(token.lexeme.into());
                     }
                 }
                 TokenKind::Escape => return Err(ParseArgsError::InvalidEscape(token.start)),
-                TokenKind::Text => tmp.push(token.lexeme.into()),
+                TokenKind::Text => args.push(token.lexeme.into()),
                 TokenKind::Space if last == TokenKind::Space => {
                     // NOTE: this happens only if there is leading space, so we don't push it
                     continue;
                 }
                 TokenKind::Space => {
-                    args.push(glue_tokens(std::mem::take(&mut tmp)));
+                    glue_tokens(&mut args, tmp_start);
+                    tmp_start += 1;
                 }
             },
         }
@@ -570,8 +574,8 @@ where
         last = token.kind();
     }
 
-    if !tmp.is_empty() {
-        args.push(glue_tokens(tmp));
+    if !args[tmp_start..].is_empty() {
+        glue_tokens(&mut args, tmp_start);
     }
 
     Ok(args)
